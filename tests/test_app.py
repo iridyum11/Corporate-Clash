@@ -10,7 +10,6 @@ BASE_URL = f"http://localhost:{PORT}"
 @pytest.fixture(scope="session")
 def streamlit_app():
     """Fixture to start and stop the Streamlit app for the test session."""
-    # Run Streamlit in headless mode for CI/CD environments
     process = subprocess.Popen(
         ["streamlit", "run", "app.py", "--server.port", PORT, "--server.headless", "true"],
         stdout=subprocess.PIPE,
@@ -20,44 +19,45 @@ def streamlit_app():
     yield
     process.kill()
 
-def test_automated_game_loop_and_combat(streamlit_app, page: Page):
+def test_ai_deploys_and_attacks(streamlit_app, page: Page):
     """
-    Tests a predictable game loop with corrected assertions based on game rules.
+    Tests that the AI can deploy a card and then attack with it on a subsequent turn,
+    using the updated rendering logic for verification.
     """
     page.goto(BASE_URL)
 
-    # --- TURN 1 ---
-    # Player has 1 caffeine. Hand is [Micromanager, Intern]. Select the "Unpaid Intern".
-    page.get_by_role("button", name="Select").nth(1).click()
+    # More specific locators targeting the horizontal blocks containing the cards
+    ai_board = page.locator('div[data-testid="stHorizontalBlock"]').nth(0)
+    player_board = page.locator('div[data-testid="stHorizontalBlock"]').nth(1)
 
-    # Deploy to the first available slot.
+    # --- TURN 1: Player Deploys an Intern ---
+    page.get_by_role("button", name="Select").nth(1).click() # Select Intern
     page.get_by_role("button", name="Deploy Here").first.click()
-
-    # Verify intern is on the board.
-    player_board = page.locator("section").filter(has=page.get_by_text("Your Department"))
     expect(player_board.get_by_text("Unpaid Intern")).to_be_visible(timeout=10000)
 
-    # End Turn. The AI takes its turn but cannot play any cards (cost > 1 caffeine).
+    # --- End Turn 1 ---
     page.get_by_role("button", name="End Turn").click()
 
-    # --- TURN 2 ---
-    # Verify we are in Turn 2.
+    # --- End Turn 2 (Player does nothing to ramp AI caffeine) ---
+    page.get_by_role("button", name="End Turn").click()
+
+    # --- TURN 3: Player's Turn Starts ---
     sidebar = page.locator('[data-testid="stSidebar"]')
-    expect(sidebar.get_by_text("Turn: 2")).to_be_visible(timeout=10000)
+    expect(sidebar.get_by_text("Turn: 3")).to_be_visible(timeout=10000)
 
-    # The Intern can now attack. Find its "Select Attacker" button.
-    player_board = page.locator("section").filter(has=page.get_by_text("Your Department"))
-    intern_container = player_board.locator('[data-testid="stVerticalBlock"]').filter(has_text="Unpaid Intern")
-    intern_container.get_by_role("button", name="Select Attacker").click()
+    # Verify the AI deployed its card. Now we can distinguish.
+    # The AI should have deployed a card on turn 2 and turn 3.
+    expect(ai_board.get_by_text("Busy working...")).to_have_count(2, timeout=10000)
+    expect(ai_board.get_by_text("Empty Cubicle")).to_have_count(3)
 
-    # Attack the first cubicle, which must be empty.
-    ai_board = page.locator("section").filter(has=page.get_by_text("Opponent's Department"))
-    ai_board.get_by_role("button", name="Target Cubicle 1").click()
+    # --- End Turn 3 (Player does nothing again) ---
+    page.get_by_role("button", name="End Turn").click()
 
-    # Assert the log shows a direct hit to sanity, because the AI had no playable cards.
+    # --- TURN 4: Player's Turn Starts ---
+    # The AI's card will now attack.
     log_container = sidebar.locator('[data-testid="stVerticalBlock"]').filter(has=page.get_by_text("Game Log"))
-    expect(log_container).to_contain_text("The cubicle was empty!", timeout=10000)
-    expect(log_container).to_contain_text("dealt 1 damage directly to the AI's Sanity")
+    expect(log_container).to_contain_text("AI's Unpaid Intern is attacking your Unpaid Intern!", timeout=10000)
+    expect(log_container).to_contain_text("Your Unpaid Intern has been defeated!")
 
-    # Verify AI sanity is now 19.
-    expect(sidebar.get_by_text("AI Sanity: 19/20")).to_be_visible()
+    # Verify the player's intern is gone from the board.
+    expect(player_board.get_by_text("Unpaid Intern")).to_have_count(0)

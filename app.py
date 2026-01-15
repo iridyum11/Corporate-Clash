@@ -1,7 +1,45 @@
 import streamlit as st
 import random
 from database import card_database
-from game_logic import resolve_combat
+
+# --- GAME LOGIC ---
+def resolve_combat(attacker_card, defender_card):
+    """
+    Calculates the outcome of a combat encounter, including damage and recoil.
+    Returns the damage to the defender, damage to the attacker (recoil), and a log message.
+    """
+    multiplier = 1.0
+    is_critical = False
+
+    # Check Rock-Paper-Scissors Logic
+    advantages = {
+        "IT Support": "Management",
+        "Management": "Sales",
+        "Sales": "HR",
+        "HR": "IT Support"
+    }
+
+    if advantages.get(attacker_card['class']) == defender_card['class']:
+        multiplier = 2.0
+        is_critical = True
+
+    damage_to_defender = attacker_card['attack'] * multiplier
+
+    # Determine outcome and log message
+    if damage_to_defender < defender_card['defense']:
+        # Attack fails, defender retaliates
+        damage_to_attacker = defender_card['attack']
+        log_message = f"{attacker_card['name']}'s attack fails! {defender_card['name']} retaliates, dealing {damage_to_attacker} recoil damage."
+        if is_critical:
+            log_message = f"A CRITICAL attack from {attacker_card['name']} was not enough! " + log_message
+    else:
+        # Attack succeeds
+        damage_to_attacker = 0
+        log_message = f"{attacker_card['name']} attacks {defender_card['name']}, dealing {damage_to_defender} damage!"
+        if is_critical:
+            log_message = f"CRITICAL HIT! {log_message}"
+
+    return damage_to_defender, damage_to_attacker, log_message
 
 # --- GAME STATE INITIALIZATION ---
 def initialize_game():
@@ -17,26 +55,27 @@ def initialize_game():
         st.session_state.turn = 1
         st.session_state.log = ["Welcome to Corporate Clash!"]
 
-        # MVP: Hardcoded Decks
-        # Create unique instances of cards for tracking
-        deck = [dict(card, uid=f"{card['id']}_{i}") for i, card in enumerate(card_database * 4)]
-        random.shuffle(deck)
+        # Create a full, unique deck first
+        full_deck = [dict(card, uid=f"{card['id']}_{i}") for i, card in enumerate(card_database * 4)]
 
-        st.session_state.player_deck = deck[:10]
-        st.session_state.ai_deck = deck[10:20]
+        # --- Deterministic Hand Assignment ---
+        # Player's hand
+        player_card_1 = next(c for c in full_deck if c['id'] == 1)
+        player_card_2 = next(c for c in full_deck if c['id'] == 5)
+        st.session_state.player_hand = [player_card_1, player_card_2]
 
-        # Deterministic hands for predictable testing
-        # Player gets a Micromanager (ID 1) and an Intern (ID 5)
-        st.session_state.player_hand = [
-            next(c for c in st.session_state.player_deck if c['id'] == 1),
-            next(c for c in st.session_state.player_deck if c['id'] == 5)
-        ]
-        # Ensure the drawn cards are removed from the deck
-        st.session_state.player_deck = [c for c in st.session_state.player_deck if c['uid'] not in [h['uid'] for h in st.session_state.player_hand]]
+        # Remove these exact cards from the deck pool
+        full_deck = [c for c in full_deck if c['uid'] not in [pc['uid'] for pc in st.session_state.player_hand]]
 
-        # Sort AI deck for predictability and deal the 3 lowest ID cards
-        st.session_state.ai_deck.sort(key=lambda x: x['id'])
-        st.session_state.ai_hand = [st.session_state.ai_deck.pop(0) for _ in range(3)]
+        # AI's hand (lowest cost cards for predictability)
+        full_deck.sort(key=lambda x: x['cost'])
+        st.session_state.ai_hand = [full_deck.pop(0) for _ in range(3)]
+
+        # --- Deck Creation ---
+        # Shuffle the remaining cards and deal the decks
+        random.shuffle(full_deck)
+        st.session_state.player_deck = full_deck[:10]
+        st.session_state.ai_deck = full_deck[10:20]
 
         # Boards (5 cubicles per side)
         st.session_state.player_board = [None] * 5
@@ -89,6 +128,45 @@ def check_game_over():
         st.session_state.game_over = True
         st.session_state.winner = "Player" # AI has no more resources
 
+def ai_attack():
+    """AI attacks with all available cards on its board."""
+    for i, slot in enumerate(st.session_state.ai_board):
+        if slot['card'] and slot['card'].get('can_attack', False):
+            attacker_card = slot['card']
+
+            # Find valid player targets
+            player_targets = [j for j, card in enumerate(st.session_state.player_board) if card is not None]
+
+            if player_targets:
+                # Make AI attack deterministic: always attack the first available target
+                target_index = player_targets[0]
+                defender_card = st.session_state.player_board[target_index]
+
+                st.session_state.log.insert(0, f"AI's {attacker_card['name']} is attacking your {defender_card['name']}!")
+
+                # Invert attacker/defender for resolve_combat
+                damage_to_player_card, recoil_to_ai, log_message = resolve_combat(attacker_card, defender_card)
+                st.session_state.log.insert(0, log_message)
+
+                # Apply damage to player's card
+                defender_card['defense'] -= damage_to_player_card
+                if defender_card['defense'] <= 0:
+                    st.session_state.log.insert(0, f"Your {defender_card['name']} has been defeated!")
+                    st.session_state.player_board[target_index] = None
+
+                # Apply recoil to AI's card
+                if recoil_to_ai > 0:
+                    attacker_card['defense'] -= recoil_to_ai
+                    if attacker_card['defense'] <= 0:
+                        st.session_state.log.insert(0, f"AI's {attacker_card['name']} was defeated by recoil!")
+                        st.session_state.ai_board[i]['card'] = None
+            else:
+                # No cards to attack, attack sanity directly
+                damage_to_sanity = attacker_card['attack']
+                st.session_state.player_sanity -= damage_to_sanity
+                st.session_state.log.insert(0, f"AI's {attacker_card['name']} attacks your Sanity directly for {damage_to_sanity} damage!")
+    check_game_over()
+
 def ai_turn():
     """AI plays a card if possible."""
     # Find playable cards and empty slots
@@ -96,8 +174,12 @@ def ai_turn():
     empty_slots = [i for i, slot in enumerate(st.session_state.ai_board) if slot['card'] is None]
 
     if playable_cards and empty_slots:
-        card_to_play = random.choice(playable_cards)
-        slot_to_fill = random.choice(empty_slots)
+        # Make AI deterministic: always play the cheapest card into the first available slot
+        card_to_play = sorted(playable_cards, key=lambda x: x['cost'])[0]
+        slot_to_fill = empty_slots[0]
+
+        # Apply summoning sickness
+        card_to_play['can_attack'] = False
 
         st.session_state.ai_caffeine -= card_to_play['cost']
         st.session_state.ai_board[slot_to_fill]['card'] = card_to_play
@@ -106,15 +188,23 @@ def ai_turn():
 
 def handle_end_turn():
     """Ends the player's turn, triggers the AI's turn, and starts the next player turn."""
-    # AI Turn
-    ai_turn()
-
-    # Start Player's Next Turn
+    # First, advance the turn and refill caffeine for both players
     st.session_state.turn += 1
-    st.session_state.player_caffeine = st.session_state.turn # Simple caffeine ramp
+    st.session_state.player_caffeine = st.session_state.turn
     st.session_state.ai_caffeine = st.session_state.turn
+    st.session_state.log.insert(0, f"--- Turn {st.session_state.turn} ---")
 
-    # Reset attack status for player cards
+    # AI 'wakes up' its units from summoning sickness
+    for slot in st.session_state.ai_board:
+        if slot['card']:
+            slot['card']['can_attack'] = True
+
+    # Now, execute the AI's turn actions
+    ai_turn()    # AI Deploys (new cards will have can_attack: False)
+    ai_attack()  # AI Attacks (will only use cards that can attack)
+
+    # Prepare for the player's new turn
+    # 'Wake up' player's units
     for card in st.session_state.player_board:
         if card:
             card['can_attack'] = True
@@ -124,9 +214,8 @@ def handle_end_turn():
         st.session_state.player_hand.append(st.session_state.player_deck.pop())
     else:
         st.session_state.log.insert(0, "Your deck is empty! You are in Burnout!")
-        # Win/loss check will handle game over
 
-    st.session_state.log.insert(0, f"--- Turn {st.session_state.turn} ---")
+    # Reset player action state
     st.session_state.selected_card_hand_index = None
     st.session_state.selected_attacker_board_index = None
     st.session_state.error_message = None
@@ -226,11 +315,14 @@ else:
                 if st.button(f"Target Cubicle {i+1}", key=f"target_{i}"):
                     handle_attack(i)
                     st.rerun()
-            # Otherwise, show the normal card/hidden state
+            # Show hidden card or empty slot
             elif not slot["revealed"]:
-                st.markdown("*"*20)
-                st.markdown("Busy working...")
-                st.markdown("*"*20)
+                if slot["card"]:
+                    st.markdown("*"*20)
+                    st.markdown("Busy working...")
+                    st.markdown("*"*20)
+                else:
+                    st.markdown("Empty Cubicle") # Visually distinct empty slot
             else:
                 render_card(slot["card"], i, is_player=False)
 
